@@ -187,7 +187,7 @@ Resources:
         MaxSize: '4'
         TargetGroupARNs:
           [!Ref S3AppTargetGroup]
-        DesiredCapacity: '1'
+        DesiredCapacity: '2'
         LaunchConfigurationName:
           !Ref S3LaunchConfiguration
         VPCZoneIdentifier:
