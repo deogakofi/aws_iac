@@ -3,7 +3,7 @@ The purpose of this project is to launch a static website from a S3 bucket using
 
 
 # INFRASTRUCTURE DIAGRAM
-![image](img/s3 website deployment.pdf)
+![image](img/s3 website deployment.png)
 
 
 # HOW TO USE FILES IN REPO
