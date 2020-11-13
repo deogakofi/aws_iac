@@ -1,0 +1,213 @@
+# Give an appropriate description for the server stacks
+Description: >
+    Deoga Kofi / S3Application Servers
+
+# Declare EnvironmentName parameter
+Parameters:
+  EnvironmentName:
+      Description: Single Parameter that we are passing with the env name.
+      Type: String
+
+# Declare resources for servers
+Resources:
+
+    # Create VPC secrity group to allow servers to reach the outside world through port 80
+    # Security group allows traffic inbound from port 80 and port 8080 to view apps
+    VPCSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: enable all inbound traffic from port 80 and enable all outbound traffic to VpcCIDR
+          GroupName: s3application
+          SecurityGroupEgress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+            - IpProtocol: tcp
+              FromPort: 8080
+              ToPort: 8080
+              CidrIp: 0.0.0.0/0
+          Tags:
+            - Key: Name
+              Value: !Sub ${EnvironmentName} SecurityGroup
+          VpcId:
+            Fn::ImportValue:
+              !Sub ${EnvironmentName}-VPCID
+
+    # Create security group for application server in private subnet
+    # Security gorup allows traffic inbound in port 80 from anywhere
+    # Security group allows traffic inbound in port 22 from internal servers
+    ApplicationSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: Application Security Group
+          GroupName: Application-security-group
+          VpcId:
+            Fn::ImportValue:
+              Fn::Sub: "${EnvironmentName}-VPCID"
+          # Inbound
+          SecurityGroupIngress:
+          - Description: Inbound rule to allow the Load Balancer.
+            IpProtocol: tcp
+            SourceSecurityGroupId: !Ref VPCSecurityGroup
+            FromPort: 80
+            ToPort: 80
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 10.0.0.0/0
+          Tags:
+            - Key: Name
+              Value: !Sub ${EnvironmentName} APP-SEC-GROUP
+
+    # Create IAM role for launchconfiguration to access s3
+    DevRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                  - ec2.amazonaws.com
+                Action:
+                  - 'sts:AssumeRole'
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+          RoleName: DevRole
+          Tags:
+            - Key: Name
+              Value: !Sub ${EnvironmentName} DevRole
+
+    # Attach the IAM role for the launchconfiguration to an instance profile
+    ProfileWithS3RolesForOurApp:
+      DependsOn: DevRole
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - DevRole
+
+    # Create LaunchConfiguration for application servers
+    S3LaunchConfiguration:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              apt-get update -y
+              apt-get install unzip awscli -y
+              apt-get install apache2 -y
+              systemctl start apache2.service
+              apt-get install tidy -y
+              apt-get update -y
+              cd /var/www/html
+              aws s3 cp s3://apache-website-demo/website.zip .
+              unzip -o website.zip
+              cd website
+              cp index.html assets project.mobirise /var/www/html/ -rf
+              tidy -q -e *.html
+              systemctl restart apache2.service
+
+          ImageId: ami-0d1cd67c26f5fca19
+          IamInstanceProfile: !Ref ProfileWithS3RolesForOurApp
+          SecurityGroups:
+          - Ref: ApplicationSecurityGroup
+          InstanceType: t2.medium
+          BlockDeviceMappings:
+          - DeviceName: "/dev/sdk"
+            Ebs:
+              VolumeSize: '10'
+
+    # Create loadbalancer
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+          Scheme: internet-facing
+          SecurityGroups: [!Ref VPCSecurityGroup]
+          Subnets:
+            - Fn::ImportValue: !Sub ${EnvironmentName}-PUB-NET1
+            - Fn::ImportValue: !Sub ${EnvironmentName}-PUB-NET2
+          Tags:
+            - Key: Name
+              Value: !Sub ${EnvironmentName} LoadBalancer
+
+    # Create listener for loadbalancer through port 80
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+           DefaultActions:
+             - Type: forward
+               TargetGroupArn:
+                 !Ref S3AppTargetGroup
+           LoadBalancerArn: !Ref LoadBalancer
+           Port: 80
+           Protocol: "HTTP"
+
+    # Create LoadBalancer listening rule
+    ALBListenerRule:
+      DependsOn: Listener
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref S3AppTargetGroup
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref Listener
+        Priority: 1
+
+    # Create a TargetGroup for the loadblanacer healthchecks
+    S3AppTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 35
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 30
+        HealthyThresholdCount: 2
+        Port: 80
+        Protocol: HTTP
+        UnhealthyThresholdCount: 5
+        VpcId:
+          Fn::ImportValue:
+            Fn::Sub: "${EnvironmentName}-VPCID"
+
+    # Create AutoScalingGroup for LaunchConfiguration
+    S3AppAutoSalingGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        MinSize: '2'
+        MaxSize: '4'
+        TargetGroupARNs:
+          [!Ref S3AppTargetGroup]
+        DesiredCapacity: '1'
+        LaunchConfigurationName:
+          !Ref S3LaunchConfiguration
+        VPCZoneIdentifier:
+        - Fn::ImportValue:
+            !Sub "${EnvironmentName}-PRIV-NET1"
+        - Fn::ImportValue:
+            !Sub "${EnvironmentName}-PRIV-NET2"
+
+# Create outputs
+Outputs:
+    # Output LoadBalancer ID
+    LoadBalancer:
+        Description: Reference to the loadbalancer ID
+        Value: !Ref LoadBalancer
+        Export:
+          Name: !Sub ${EnvironmentName}-LOAD-BAL-ID
+
+    # Output LoadBalancer URL with 'HTTP' prefix
+    LoadBalancerURL:
+        Description: Reference to the loadbalancer URL
+        Value: !Join ["", ["http://", !GetAtt LoadBalancer.DNSName]]
+        Export:
+          Name: !Sub ${EnvironmentName}-LOAD-BAL-URL
